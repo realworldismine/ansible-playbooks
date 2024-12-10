@@ -1,0 +1,80 @@
+---
+- name: Perform multiple Docker and PostgreSQL tasks
+  hosts: all
+  become: true
+  vars:
+    # Variables for Docker
+    aiops_name: "xxx-metric"
+    collector_name: "xxx-collector"
+
+    docker_context_path: "/xxx"
+    docker_image_name: "xxx/xxx:xxx"
+    docker_compose_path: "/xxx"
+    docker_compose_file: "/xxx/docker.yaml"
+
+    # Variables for PostgreSQL
+    postgres_user: "xxx"
+    postgres_password: "xxx"
+    postgres_database: "xxx"
+
+    # Variables for file operations
+    directory_to_clean_af: "/xxx/"
+    directory_to_clean_col: "/xxx/"
+
+  tasks:
+    - name: Stop a specific Docker container of AIOps
+      community.docker.docker_container:
+        name: "{{ aiops_name }}"
+        state: stopped
+
+    - name: Stop a specific Docker container of Collector
+      community.docker.docker_container:
+        name: "{{ collector_name }}"
+        state: stopped
+
+    - name: Delete all files in a directory of AIOps
+      ansible.builtin.shell:
+        cmd: "rm -rf {{ directory_to_clean_af }}/*"
+
+    - name: Delete all files in a directory of Collector
+      ansible.builtin.shell:
+        cmd: "rm -rf {{ directory_to_clean_col }}/*"
+
+    - name: Build a Docker image
+      ansible.builtin.command:
+        cmd: docker build -t {{ docker_image_name }} .
+        chdir: "{{ docker_context_path }}"
+
+    - name: Backup PostgreSQL database with date-based filename
+      ansible.builtin.shell:
+        cmd: "docker exec -t aiops pg_dump -U postgres -F c -d {{ postgres_database }} > pg_backup_{{ postgres_database }}_{{ ansible_date_time.date | regex_replace('-', '') }}.dump"
+
+    - name: Create SQL file for dropping tables
+      ansible.builtin.copy:
+        content: |
+          DO $$ DECLARE
+            rec RECORD;
+          BEGIN
+            FOR rec IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+              EXECUTE 'DROP TABLE IF EXISTS ' || rec.tablename || ' CASCADE';
+            END LOOP;
+          END $$;
+        dest: /tmp/drop_tables.sql
+        mode: '0644'
+
+    - name: Copy SQL file into Docker container
+      ansible.builtin.command:
+        cmd: docker cp /tmp/drop_tables.sql aiops:/tmp/drop_tables.sql
+
+    - name: Execute SQL file in PostgreSQL Docker container
+      ansible.builtin.shell:
+        cmd: >
+          docker exec -e PGPASSWORD={{ postgres_password }} -t aiops
+          psql -U {{ postgres_user }} -d {{ postgres_database }} -f /tmp/drop_tables.sql
+
+    - name: Start containers with a specific Docker Compose file
+      community.docker.docker_compose:
+        project_src: "{{ docker_compose_path }}"
+        files:
+          - "{{ docker_compose_file }}"
+        state: present
